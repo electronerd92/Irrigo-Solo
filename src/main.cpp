@@ -3,6 +3,7 @@
 #include <avr/wdt.h>
 #include <Wire.h>
 #include <SPI.h>
+#include <EEPROM.h>
 #include <RTClib.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -18,10 +19,24 @@
 #define TEST_BUTTON 11
 #define PUMP_PIN 10
 
+struct WateringStats
+{
+  uint16_t signature;
+
+  uint32_t wateringCount;
+  uint32_t lastWateringUnix;
+
+  uint16_t lastMoisture;
+  uint16_t lastMoistureRead;
+};
+
+const uint16_t EEPROM_SIGNATURE = 0xCAFE;
+
+WateringStats stats;
 const uint32_t wateringDuration = 120000; // 2 minutes 30 secondsin milliseconds
 const uint8_t wateringHour = 7;           // 7 AM
 const float temperatureThreshold = 30.0;  // 30 degrees Celsius
-const uint16_t moistureThreshold = 1800;  // if more than 1800mV watering is needed
+const uint16_t moistureThreshold = 1250;  // if more than 1250mV watering is needed
 
 /* Calibration notes:
 Soil Moisture Sensor Calibration:
@@ -63,6 +78,8 @@ void printDiagnostics();
 uint16_t readSoilRaw();
 long readVcc_mV();
 long readSoil_mV();
+void loadStats();
+void registerWatering();
 
 // Watchdog interrupt handler
 ISR(WDT_vect)
@@ -127,6 +144,8 @@ void setup()
     // rtc.adjust(compileTime());
     rtc.adjust(DateTime(2026, 4, 23, 11, 16, 0));
   }
+
+  loadStats();
 }
 
 void loop()
@@ -176,6 +195,7 @@ void loop()
       digitalWrite(PUMP_PIN, HIGH);
       delay(wateringDuration);
       digitalWrite(PUMP_PIN, LOW);
+      registerWatering();
     }
   }
 }
@@ -400,7 +420,15 @@ bool canWatering()
   if (currentHour == 7 || currentHour == 21)
   {
     uint16_t moisture = readSoil_mV();
-    return (moisture >= moistureThreshold);
+    stats.lastMoistureRead = moisture;
+    bool shouldWater = (moisture >= moistureThreshold);
+    if (shouldWater)
+    {
+      stats.lastMoisture = moisture;
+    }
+    EEPROM.put(0, stats);
+
+    return shouldWater;
   }
   return false;
 }
@@ -450,4 +478,66 @@ void printDiagnostics()
   Serial.print(" C | Moisture: ");
   Serial.print(moisture);
   Serial.println(" mV");
+
+  Serial.println();
+  Serial.print("Watering Count: ");
+  Serial.println(stats.wateringCount);
+
+  if (stats.wateringCount > 0)
+  {
+    DateTime last(stats.lastWateringUnix);
+
+    uint32_t ageHours =
+        (rtc.now().unixtime() - stats.lastWateringUnix) / 3600UL;
+
+    Serial.print("Last Watering: ");
+    Serial.print(ageHours);
+    Serial.print("h ago (");
+
+    Serial.print(last.hour());
+    Serial.print("h ");
+
+    if (last.day() < 10)
+      Serial.print('0');
+    Serial.print(last.day());
+    Serial.print('/');
+
+    if (last.month() < 10)
+      Serial.print('0');
+    Serial.print(last.month());
+
+    Serial.println(")");
+
+    Serial.print("Moisture at watering: ");
+    Serial.print(stats.lastMoisture);
+    Serial.println(" mV");
+  }
+
+  Serial.print("Last Moisture Reading: ");
+  Serial.print(stats.lastMoistureRead);
+  Serial.println(" mV");
+}
+
+void loadStats()
+{
+  EEPROM.get(0, stats);
+
+  if (stats.signature != EEPROM_SIGNATURE)
+  {
+    memset(&stats, 0, sizeof(stats));
+
+    stats.signature = EEPROM_SIGNATURE;
+
+    EEPROM.put(0, stats);
+
+    Serial.println("EEPROM initialized");
+  }
+}
+
+void registerWatering()
+{
+  stats.wateringCount++;
+  stats.lastWateringUnix = rtc.now().unixtime();
+
+  EEPROM.put(0, stats);
 }
